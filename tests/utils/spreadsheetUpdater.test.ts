@@ -1,24 +1,27 @@
-import { mock } from 'jest-mock-extended';
-import { updateSpreadsheetWithLocalChanges } from '../../src/utils/spreadsheetUpdater';
+import { mock } from 'vitest-mock-extended';
+import {
+  updateSpreadsheetWithLocalChanges,
+  columnIndexToLetter,
+} from '../../src/utils/spreadsheetUpdater';
 import type { GoogleSpreadsheet } from 'google-spreadsheet';
 import type { TranslationData } from '../../src/types';
 
 // Mock the rateLimiter to speed up tests
-jest.mock('../../src/utils/rateLimiter', () => ({
-  withRetry: jest.fn().mockImplementation((fn: () => Promise<unknown>) => fn()),
+vi.mock('../../src/utils/rateLimiter', () => ({
+  withRetry: vi.fn().mockImplementation((fn: () => Promise<unknown>) => fn()),
 }));
 
 describe('updateSpreadsheetWithLocalChanges', () => {
   // Create mock objects
   const mockSheet = {
-    getRows: jest.fn(),
-    addRows: jest.fn()
+    getRows: vi.fn(),
+    addRows: vi.fn(),
   };
-  
+
   const mockRow = {
-    toObject: jest.fn(),
-    set: jest.fn(),
-    save: jest.fn()
+    toObject: vi.fn(),
+    set: vi.fn(),
+    save: vi.fn(),
   };
 
   // Create mock document
@@ -26,176 +29,215 @@ describe('updateSpreadsheetWithLocalChanges', () => {
   // Will set sheetsByTitle in beforeEach
 
   beforeEach(() => {
-    jest.clearAllMocks();
+    vi.clearAllMocks();
     // Use type assertion to handle readonly property
-    (mockDoc as any).sheetsByTitle = { 'home': mockSheet as any };
-    
+    (mockDoc as any).sheetsByTitle = { home: mockSheet as any };
+
     // Default mock implementations
     mockSheet.getRows.mockResolvedValue([mockRow]);
-    mockRow.toObject.mockReturnValue({ 'key': 'welcome', 'en': 'Welcome', 'fr': 'Bienvenue' });
+    mockRow.toObject.mockReturnValue({ key: 'welcome', en: 'Welcome', fr: 'Bienvenue' });
     mockRow.save.mockResolvedValue(undefined);
     mockSheet.addRows.mockResolvedValue([]);
-    
+
     // Spy on console.log and console.warn
-    jest.spyOn(console, 'log').mockImplementation(() => {});
-    jest.spyOn(console, 'warn').mockImplementation(() => {});
-    
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+
     // Log mock row object to help debug
     console.log('Mock row object in beforeEach:', mockRow.toObject());
   });
 
   afterEach(() => {
-    jest.restoreAllMocks();
+    vi.restoreAllMocks();
   });
 
   test('should do nothing when changes object is empty', async () => {
     const changes: TranslationData = {};
     await updateSpreadsheetWithLocalChanges(mockDoc, changes, 0);
-    
+
     expect(mockSheet.getRows).not.toHaveBeenCalled();
     expect(mockSheet.addRows).not.toHaveBeenCalled();
   });
 
   test('should warn when sheet does not exist', async () => {
     const changes: TranslationData = {
-      'en': {
-        'nonexistent': {
-          'welcome': 'Welcome'
-        }
-      }
+      en: {
+        nonexistent: {
+          welcome: 'Welcome',
+        },
+      },
     };
-    
+
     await updateSpreadsheetWithLocalChanges(mockDoc, changes, 0);
-    
-    expect(console.warn).toHaveBeenCalledWith(
-      expect.stringContaining('not found in the document')
-    );
+
+    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('not found in the document'));
   });
 
   test('should warn when no rows exist in the sheet', async () => {
     mockSheet.getRows.mockResolvedValueOnce([]);
-    
+
     const changes: TranslationData = {
-      'en': {
-        'home': {
-          'welcome': 'Welcome'
-        }
-      }
+      en: {
+        home: {
+          welcome: 'Welcome',
+        },
+      },
     };
-    
+
     await updateSpreadsheetWithLocalChanges(mockDoc, changes, 0);
-    
-    expect(console.warn).toHaveBeenCalledWith(
-      expect.stringContaining('No rows found in sheet')
-    );
+
+    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('No rows found in sheet'));
   });
 
   test('should update an existing key with new translation', async () => {
     // Set up the mock to simulate an existing key
-    mockRow.toObject.mockReturnValue({ 'key': 'welcome', 'en': 'Old Welcome' });
-    
+    mockRow.toObject.mockReturnValue({ key: 'welcome', en: 'Old Welcome' });
+
     const changes: TranslationData = {
-      'en': {
-        'home': {
-          'welcome': 'New Welcome'
-        }
-      }
+      en: {
+        home: {
+          welcome: 'New Welcome',
+        },
+      },
     };
-    
+
     await updateSpreadsheetWithLocalChanges(mockDoc, changes, 0);
-    
+
     // The key already exists, so we should update it
     expect(mockRow.set).toHaveBeenCalledWith('en', 'New Welcome');
     expect(mockRow.save).toHaveBeenCalled();
-    
+
     // No new rows should be added
     expect(mockSheet.addRows).not.toHaveBeenCalled();
   });
 
+  test('should wait after saving an existing row when throttling is enabled', async () => {
+    vi.useFakeTimers();
+    mockRow.toObject.mockReturnValue({ key: 'welcome', en: 'Old Welcome' });
+
+    const promise = updateSpreadsheetWithLocalChanges(
+      mockDoc,
+      { en: { home: { welcome: 'New Welcome' } } },
+      1,
+    );
+
+    await vi.advanceTimersByTimeAsync(1000);
+    await promise;
+    vi.useRealTimers();
+
+    expect(mockRow.save).toHaveBeenCalled();
+  });
+  test('should log an error when saving an existing row fails', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    mockRow.toObject.mockReturnValue({ key: 'welcome', en: 'Old Welcome' });
+    mockRow.save.mockRejectedValueOnce(new Error('save failed'));
+
+    await updateSpreadsheetWithLocalChanges(
+      mockDoc,
+      { en: { home: { welcome: 'New Welcome' } } },
+      0,
+    );
+
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Failed to save row for key "welcome"'),
+      expect.any(Error),
+    );
+  });
+
   test('should add a new key when it does not exist', async () => {
     // Set up the mock to simulate that the key doesn't exist
-    mockRow.toObject.mockReturnValue({ 'key': 'existing_key', 'en': 'Existing Value' });
-    
+    mockRow.toObject.mockReturnValue({ key: 'existing_key', en: 'Existing Value' });
+
     const changes: TranslationData = {
-      'en': {
-        'home': {
-          'new_key': 'New Value'
-        }
-      }
+      en: {
+        home: {
+          new_key: 'New Value',
+        },
+      },
     };
-    
+
     await updateSpreadsheetWithLocalChanges(mockDoc, changes, 0);
-    
+
     // A new row should be added since the key doesn't exist
     expect(mockSheet.addRows).toHaveBeenCalledWith([
-      expect.objectContaining({ 'key': 'new_key', 'en': 'New Value' })
+      expect.objectContaining({ key: 'new_key', en: 'New Value' }),
     ]);
   });
 
   test('should handle multiple locales and keys', async () => {
     // Set up the mock to simulate some existing keys
     const rows = [
-      { toObject: jest.fn().mockReturnValue({ 'key': 'welcome', 'en': 'Welcome', 'fr': 'Bienvenue' }), set: jest.fn(), save: jest.fn() },
-      { toObject: jest.fn().mockReturnValue({ 'key': 'goodbye', 'en': 'Goodbye', 'fr': 'Au revoir' }), set: jest.fn(), save: jest.fn() }
+      {
+        toObject: vi.fn().mockReturnValue({ key: 'welcome', en: 'Welcome', fr: 'Bienvenue' }),
+        set: vi.fn(),
+        save: vi.fn(),
+      },
+      {
+        toObject: vi.fn().mockReturnValue({ key: 'goodbye', en: 'Goodbye', fr: 'Au revoir' }),
+        set: vi.fn(),
+        save: vi.fn(),
+      },
     ];
     mockSheet.getRows.mockResolvedValueOnce(rows);
-    
+
     const changes: TranslationData = {
-      'en': {
-        'home': {
-          'welcome': 'Updated Welcome',
-          'new_key': 'New Key'
-        }
+      en: {
+        home: {
+          welcome: 'Updated Welcome',
+          new_key: 'New Key',
+        },
       },
-      'fr': {
-        'home': {
-          'goodbye': 'Nouveau Au revoir',
-          'new_key': 'Nouvelle Clé'
-        }
-      }
+      fr: {
+        home: {
+          goodbye: 'Nouveau Au revoir',
+          new_key: 'Nouvelle Clé',
+        },
+      },
     };
-    
+
     await updateSpreadsheetWithLocalChanges(mockDoc, changes, 0);
-    
+
     // Should update the existing keys
     expect(rows[0].set).toHaveBeenCalledWith('en', 'Updated Welcome');
     expect(rows[1].set).toHaveBeenCalledWith('fr', 'Nouveau Au revoir');
-    
+
     // Should add a new row for the new key with both EN and FR values
-    expect(mockSheet.addRows).toHaveBeenCalledWith(expect.arrayContaining([
-      expect.objectContaining({ 
-        'key': 'new_key',
-        'en': 'New Key',
-        'fr': 'Nouvelle Clé'
-      })
-    ]));
+    expect(mockSheet.addRows).toHaveBeenCalledWith(
+      expect.arrayContaining([
+        expect.objectContaining({
+          key: 'new_key',
+          en: 'New Key',
+          fr: 'Nouvelle Clé',
+        }),
+      ]),
+    );
   });
-  
+
   test('should process multiple sheets', async () => {
     // Add another mock sheet
     const mockAboutSheet = {
-      getRows: jest.fn().mockResolvedValue([mockRow]),
-      addRows: jest.fn()
+      getRows: vi.fn().mockResolvedValue([mockRow]),
+      addRows: vi.fn(),
     };
     // Use type assertion to deal with readonly property
-    (mockDoc as any).sheetsByTitle = { 
-      'home': mockSheet as any,
-      'about': mockAboutSheet as any 
+    (mockDoc as any).sheetsByTitle = {
+      home: mockSheet as any,
+      about: mockAboutSheet as any,
     };
-    
+
     const changes: TranslationData = {
-      'en': {
-        'home': {
-          'new_key': 'New Home Key'
+      en: {
+        home: {
+          new_key: 'New Home Key',
         },
-        'about': {
-          'new_key': 'New About Key'
-        }
-      }
+        about: {
+          new_key: 'New About Key',
+        },
+      },
     };
-    
+
     await updateSpreadsheetWithLocalChanges(mockDoc, changes, 0);
-    
+
     // Both sheets should be processed
     expect(mockSheet.getRows).toHaveBeenCalled();
     expect(mockAboutSheet.getRows).toHaveBeenCalled();
@@ -205,19 +247,24 @@ describe('updateSpreadsheetWithLocalChanges', () => {
 
   test('should add auto-translation formulas when enabled', async () => {
     // Set up the mock with multiple language columns
-    mockRow.toObject.mockReturnValue({ 'key': 'existing_key', 'en': 'Existing Value', 'fr': 'Valeur Existante', 'de': 'Vorhandener Wert' });
-    
+    mockRow.toObject.mockReturnValue({
+      key: 'existing_key',
+      en: 'Existing Value',
+      fr: 'Valeur Existante',
+      de: 'Vorhandener Wert',
+    });
+
     const changes: TranslationData = {
-      'en': {
-        'home': {
-          'new_key': 'New Value'
-        }
-      }
+      en: {
+        home: {
+          new_key: 'New Value',
+        },
+      },
     };
-    
+
     // Call with autoTranslate = true
     await updateSpreadsheetWithLocalChanges(mockDoc, changes, 0, true);
-    
+
     // Verify that a new row was added with GOOGLETRANSLATE formulas for missing languages.
     // The formula dynamically extracts the language code from the header cell using
     // IF(LOWER(LEFT(...))="zh-"...) with consistent separators.
@@ -238,27 +285,32 @@ describe('updateSpreadsheetWithLocalChanges', () => {
 
   test('should not add auto-translation formulas when disabled', async () => {
     // Set up the mock with multiple language columns
-    mockRow.toObject.mockReturnValue({ 'key': 'existing_key', 'en': 'Existing Value', 'fr': 'Valeur Existante', 'de': 'Vorhandener Wert' });
-    
+    mockRow.toObject.mockReturnValue({
+      key: 'existing_key',
+      en: 'Existing Value',
+      fr: 'Valeur Existante',
+      de: 'Vorhandener Wert',
+    });
+
     const changes: TranslationData = {
-      'en': {
-        'home': {
-          'new_key': 'New Value'
-        }
-      }
+      en: {
+        home: {
+          new_key: 'New Value',
+        },
+      },
     };
-    
+
     // Call with default autoTranslate = false
     await updateSpreadsheetWithLocalChanges(mockDoc, changes, 0);
-    
+
     // Verify that a new row was added without GOOGLETRANSLATE formulas
     expect(mockSheet.addRows).toHaveBeenCalledWith([
       expect.objectContaining({
-        'key': 'new_key',
-        'en': 'New Value'
-      })
+        key: 'new_key',
+        en: 'New Value',
+      }),
     ]);
-    
+
     // Check that the formula fields were not added
     const addedRow = mockSheet.addRows.mock.calls[0][0][0];
     expect(addedRow.fr).toBeUndefined();
@@ -267,28 +319,34 @@ describe('updateSpreadsheetWithLocalChanges', () => {
 
   test('should handle complex auto-translation scenarios with multiple source languages', async () => {
     // Set up the mock with multiple language columns
-    mockRow.toObject.mockReturnValue({ 'key': 'existing_key', 'en': 'Existing Value', 'fr': 'Valeur Existante', 'de': 'Vorhandener Wert', 'es': 'Valor Existente' });
-    
+    mockRow.toObject.mockReturnValue({
+      key: 'existing_key',
+      en: 'Existing Value',
+      fr: 'Valeur Existante',
+      de: 'Vorhandener Wert',
+      es: 'Valor Existente',
+    });
+
     const changes: TranslationData = {
-      'fr': {
-        'home': {
-          'new_key1': 'Nouvelle Valeur'
-        }
+      fr: {
+        home: {
+          new_key1: 'Nouvelle Valeur',
+        },
       },
-      'de': {
-        'home': {
-          'new_key2': 'Neuer Wert'
-        }
-      }
+      de: {
+        home: {
+          new_key2: 'Neuer Wert',
+        },
+      },
     };
-    
+
     // Call with autoTranslate = true
     await updateSpreadsheetWithLocalChanges(mockDoc, changes, 0, true);
-    
+
     // Verify that new rows were added with correct GOOGLETRANSLATE formulas.
     // Formulas now embed the correct language codes directly.
     const addedRows = mockSheet.addRows.mock.calls[0][0];
-    
+
     // First new key should translate from French (column C) to other languages
     const row1 = addedRows.find((r: Record<string, string>) => r['key'] === 'new_key1');
     expect(row1['fr']).toBe('Nouvelle Valeur');
@@ -298,7 +356,7 @@ describe('updateSpreadsheetWithLocalChanges', () => {
     expect(row1['de']).toContain('D$1');
     expect(row1['es']).toMatch(/^=GOOGLETRANSLATE\(INDIRECT\("C"&ROW\(\)\)/);
     expect(row1['es']).toContain('E$1');
-    
+
     // Second new key should translate from German (column D) to other languages
     const row2 = addedRows.find((r: Record<string, string>) => r['key'] === 'new_key2');
     expect(row2['de']).toBe('Neuer Wert');
@@ -315,7 +373,7 @@ describe('updateSpreadsheetWithLocalChanges', () => {
     // but headerRow is fully lowercased, causing indexOf to return -1 for mixed-case
     // headers like 'en-GB' → the formula was silently skipped.
     mockRow.toObject.mockReturnValue({
-      'key': 'existing_key',
+      key: 'existing_key',
       'en-GB': 'Existing Value',
       'de-DE': 'Bestehender Wert',
       'fr-FR': 'Valeur Existante',
@@ -323,8 +381,8 @@ describe('updateSpreadsheetWithLocalChanges', () => {
 
     const changes: TranslationData = {
       'en-GB': {
-        'home': {
-          'new_key': 'New Value',
+        home: {
+          new_key: 'New Value',
         },
       },
     };
@@ -353,15 +411,15 @@ describe('updateSpreadsheetWithLocalChanges', () => {
     // causing the check to always evaluate to falsy → formulas added for locales that
     // already have a value.
     mockRow.toObject.mockReturnValue({
-      'key': 'existing_key',
+      key: 'existing_key',
       'en-GB': 'Existing Value',
       'de-DE': 'Bestehender Wert',
     });
 
     // Provide translations for BOTH locales — neither should get a GOOGLETRANSLATE formula
     const changes: TranslationData = {
-      'en-GB': { 'home': { 'new_key': 'New Value' } },
-      'de-DE': { 'home': { 'new_key': 'Neuer Wert' } },
+      'en-GB': { home: { new_key: 'New Value' } },
+      'de-DE': { home: { new_key: 'Neuer Wert' } },
     };
 
     await updateSpreadsheetWithLocalChanges(mockDoc, changes, 0, true);
@@ -384,15 +442,16 @@ describe('updateSpreadsheetWithLocalChanges', () => {
     // 'en-US', getOriginalHeaderForLocale() previously returned undefined (no match),
     // causing the row to be added with only the key column and no translation value.
     mockRow.toObject.mockReturnValue({
-      'key': 'existing_key',
+      key: 'existing_key',
       'en-US': 'Existing Value',
       'de-DE': 'Bestehender Wert',
     });
 
     const changes: TranslationData = {
-      'en': {   // <── short locale code, spreadsheet header is 'en-US'
-        'home': { 'nav_guide': 'Navigation Guide' }
-      }
+      en: {
+        // <── short locale code, spreadsheet header is 'en-US'
+        home: { nav_guide: 'Navigation Guide' },
+      },
     };
 
     await updateSpreadsheetWithLocalChanges(mockDoc, changes, 0, false);
@@ -410,13 +469,13 @@ describe('updateSpreadsheetWithLocalChanges', () => {
   test('should update existing row translation when locale "en" resolves to "en-US" header', async () => {
     // Same locale-family scenario but key already exists in the sheet (update path)
     mockRow.toObject.mockReturnValue({
-      'key': 'hero_title',
-      'en-US': '',        // empty – should be updated
+      key: 'hero_title',
+      'en-US': '', // empty – should be updated
       'de-DE': 'Held Titel',
     });
 
     const changes: TranslationData = {
-      'en': { 'home': { 'hero_title': 'Hero Title' } }
+      en: { home: { hero_title: 'Hero Title' } },
     };
 
     await updateSpreadsheetWithLocalChanges(mockDoc, changes, 0, false);
@@ -433,13 +492,13 @@ describe('updateSpreadsheetWithLocalChanges', () => {
     // Simulates the scenario where 'ui' sheet does not yet exist in the spreadsheet
     // but localeMapping is available from the previously processed 'i18n' sheet.
     const mockNewSheet = {
-      getRows: jest.fn().mockResolvedValue([]),  // newly created — no data rows
-      addRows: jest.fn().mockResolvedValue([]),
+      getRows: vi.fn().mockResolvedValue([]), // newly created — no data rows
+      addRows: vi.fn().mockResolvedValue([]),
     };
-    (mockDoc as any).addSheet = jest.fn().mockResolvedValue(mockNewSheet);
+    (mockDoc as any).addSheet = vi.fn().mockResolvedValue(mockNewSheet);
 
     const changes: TranslationData = {
-      'en-us': { 'ui': { 'nav_guide': 'Guide', 'nav_api': 'API' } },
+      'en-us': { ui: { nav_guide: 'Guide', nav_api: 'API' } },
     };
     const localeMapping: Record<string, string> = { 'en-us': 'en-US', 'de-de': 'de-DE' };
 
@@ -454,21 +513,36 @@ describe('updateSpreadsheetWithLocalChanges', () => {
     // New keys should be added to the newly created sheet
     expect(mockNewSheet.addRows).toHaveBeenCalled();
     const addedRows: Record<string, string>[] = mockNewSheet.addRows.mock.calls[0][0];
-    expect(addedRows).toContainEqual(expect.objectContaining({ key: 'nav_guide', 'en-US': 'Guide' }));
+    expect(addedRows).toContainEqual(
+      expect.objectContaining({ key: 'nav_guide', 'en-US': 'Guide' }),
+    );
     expect(addedRows).toContainEqual(expect.objectContaining({ key: 'nav_api', 'en-US': 'API' }));
   });
 
   test('should warn when sheet does not exist and localeMapping is empty', async () => {
     // When no localeMapping is available, auto-creation is not possible
     const changes: TranslationData = {
-      'en': { 'missing': { 'key1': 'Value' } },
+      en: { missing: { key1: 'Value' } },
     };
 
     // localeMapping defaults to {} — should still warn, not try to create
     await updateSpreadsheetWithLocalChanges(mockDoc, changes, 0, false, {});
 
+    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('not found in the document'));
+  });
+
+  test('should warn and skip when addSheet unexpectedly returns undefined', async () => {
+    (mockDoc as any).sheetsByTitle = {};
+    (mockDoc as any).addSheet = vi.fn().mockResolvedValue(undefined);
+
+    const changes: TranslationData = {
+      en: { missing: { key1: 'Value' } },
+    };
+
+    await updateSpreadsheetWithLocalChanges(mockDoc, changes, 0, false, { en: 'en' });
+
     expect(console.warn).toHaveBeenCalledWith(
-      expect.stringContaining('not found in the document')
+      expect.stringContaining('could not be found or created, skipping'),
     );
   });
 
@@ -477,7 +551,7 @@ describe('updateSpreadsheetWithLocalChanges', () => {
     mockSheet.getRows.mockResolvedValueOnce([]);
 
     const changes: TranslationData = {
-      'en-us': { 'home': { 'hello': 'Hello', 'bye': 'Goodbye' } },
+      'en-us': { home: { hello: 'Hello', bye: 'Goodbye' } },
     };
     const localeMapping: Record<string, string> = { 'en-us': 'en-US', 'de-de': 'de-DE' };
 
@@ -498,9 +572,9 @@ describe('updateSpreadsheetWithLocalChanges', () => {
   test('should never push keys to the reserved "i18n" metadata sheet', async () => {
     // The i18n sheet holds locale display names and must be excluded from all push operations.
     const changes: TranslationData = {
-      'en': {
-        'i18n': { 'en': 'English', 'de': 'German' },  // must be skipped
-        'home': { 'welcome': 'Welcome' },               // must be processed normally
+      en: {
+        i18n: { en: 'English', de: 'German' }, // must be skipped
+        home: { welcome: 'Welcome' }, // must be processed normally
       },
     };
 
@@ -509,26 +583,26 @@ describe('updateSpreadsheetWithLocalChanges', () => {
     // 'home' sheet is processed; 'i18n' sheet is skipped entirely
     expect(mockSheet.getRows).toHaveBeenCalledTimes(1);
     expect(console.log).toHaveBeenCalledWith(
-      expect.stringContaining('Skipping reserved metadata sheet "i18n"')
+      expect.stringContaining('Skipping reserved metadata sheet "i18n"'),
     );
   });
 
   test('should ONLY skip i18n sheet, not other sheets with similar names', async () => {
     // Sheets named e.g. "i18nExtras" or "myI18n" should not be skipped
     const mockOtherSheet = {
-      getRows: jest.fn().mockResolvedValue([]),
-      addRows: jest.fn().mockResolvedValue([]),
+      getRows: vi.fn().mockResolvedValue([]),
+      addRows: vi.fn().mockResolvedValue([]),
     };
     (mockDoc as any).sheetsByTitle = {
-      'home': mockSheet as any,
-      'i18nExtras': mockOtherSheet as any,
+      home: mockSheet as any,
+      i18nExtras: mockOtherSheet as any,
     };
-    const localeMapping: Record<string, string> = { 'en': 'en' };
+    const localeMapping: Record<string, string> = { en: 'en' };
     const changes: TranslationData = {
-      'en': {
-        'i18n': { 'en': 'English' },        // skipped
-        'home': { 'welcome': 'Welcome' },    // processed
-        'i18nExtras': { 'key1': 'Value' },   // processed (not the reserved sheet)
+      en: {
+        i18n: { en: 'English' }, // skipped
+        home: { welcome: 'Welcome' }, // processed
+        i18nExtras: { key1: 'Value' }, // processed (not the reserved sheet)
       },
     };
 
@@ -553,8 +627,14 @@ describe('updateSpreadsheetWithLocalChanges', () => {
     // Source locale should be updated with the actual value
     expect(mockRow.set).toHaveBeenCalledWith('en', 'Hero Title Updated');
     // Empty columns should receive GOOGLETRANSLATE formulas
-    expect(mockRow.set).toHaveBeenCalledWith('fr', expect.stringMatching(/^=GOOGLETRANSLATE\(INDIRECT\(/));
-    expect(mockRow.set).toHaveBeenCalledWith('de', expect.stringMatching(/^=GOOGLETRANSLATE\(INDIRECT\(/));
+    expect(mockRow.set).toHaveBeenCalledWith(
+      'fr',
+      expect.stringMatching(/^=GOOGLETRANSLATE\(INDIRECT\(/),
+    );
+    expect(mockRow.set).toHaveBeenCalledWith(
+      'de',
+      expect.stringMatching(/^=GOOGLETRANSLATE\(INDIRECT\(/),
+    );
     expect(mockRow.save).toHaveBeenCalled();
   });
 
@@ -570,15 +650,23 @@ describe('updateSpreadsheetWithLocalChanges', () => {
 
     expect(mockRow.set).toHaveBeenCalledWith('en', 'Home Updated');
     // 'fr' already has a value and override=false → must NOT be overwritten with a formula
-    const frCalls = (mockRow.set as jest.Mock).mock.calls.filter(([h]: [string]) => h === 'fr');
+    const frCalls = (mockRow.set as Mock).mock.calls.filter((call: any[]) => call[0] === 'fr');
     expect(frCalls).toHaveLength(0);
     // 'de' is empty → should get a formula
-    expect(mockRow.set).toHaveBeenCalledWith('de', expect.stringMatching(/^=GOOGLETRANSLATE\(INDIRECT\(/));
+    expect(mockRow.set).toHaveBeenCalledWith(
+      'de',
+      expect.stringMatching(/^=GOOGLETRANSLATE\(INDIRECT\(/),
+    );
   });
 
   test('should overwrite non-empty cells of existing key when autoTranslate=true and override=true', async () => {
     // Row exists: all cells have values
-    mockRow.toObject.mockReturnValue({ key: 'nav_home', en: 'Home', fr: 'Accueil', de: 'Startseite' });
+    mockRow.toObject.mockReturnValue({
+      key: 'nav_home',
+      en: 'Home',
+      fr: 'Accueil',
+      de: 'Startseite',
+    });
 
     const changes: TranslationData = {
       en: { home: { nav_home: 'Home Revised' } },
@@ -588,8 +676,14 @@ describe('updateSpreadsheetWithLocalChanges', () => {
 
     expect(mockRow.set).toHaveBeenCalledWith('en', 'Home Revised');
     // Both non-empty columns must be overwritten with formulas
-    expect(mockRow.set).toHaveBeenCalledWith('fr', expect.stringMatching(/^=GOOGLETRANSLATE\(INDIRECT\(/));
-    expect(mockRow.set).toHaveBeenCalledWith('de', expect.stringMatching(/^=GOOGLETRANSLATE\(INDIRECT\(/));
+    expect(mockRow.set).toHaveBeenCalledWith(
+      'fr',
+      expect.stringMatching(/^=GOOGLETRANSLATE\(INDIRECT\(/),
+    );
+    expect(mockRow.set).toHaveBeenCalledWith(
+      'de',
+      expect.stringMatching(/^=GOOGLETRANSLATE\(INDIRECT\(/),
+    );
     expect(mockRow.save).toHaveBeenCalled();
   });
 
@@ -604,7 +698,7 @@ describe('updateSpreadsheetWithLocalChanges', () => {
 
     expect(mockRow.set).toHaveBeenCalledWith('en', 'Click me now');
     // autoTranslate=false → other columns must not be touched
-    const otherCalls = (mockRow.set as jest.Mock).mock.calls.filter(([h]: [string]) => h !== 'en');
+    const otherCalls = (mockRow.set as Mock).mock.calls.filter((call: any[]) => call[0] !== 'en');
     expect(otherCalls).toHaveLength(0);
   });
 
@@ -612,7 +706,7 @@ describe('updateSpreadsheetWithLocalChanges', () => {
     // Both 'en' and 'fr' are being pushed for the same existing key.
     // When processing 'en', the auto-translate logic must NOT add a formula for 'fr'
     // because 'fr' will be set to an actual value in the same batch.
-    const rowEn = { toObject: jest.fn(), set: jest.fn(), save: jest.fn() };
+    const rowEn = { toObject: vi.fn(), set: vi.fn(), save: vi.fn() };
     rowEn.toObject.mockReturnValue({ key: 'title', en: 'Old', fr: '' });
     rowEn.save.mockResolvedValue(undefined);
 
@@ -627,10 +721,10 @@ describe('updateSpreadsheetWithLocalChanges', () => {
 
     // 'fr' should have been set with the actual value (from the 'fr' locale iteration),
     // not a GOOGLETRANSLATE formula (which would have come from the 'en' locale iteration).
-    const frCalls = (rowEn.set as jest.Mock).mock.calls.filter(([h]: [string]) => h === 'fr');
+    const frCalls = (rowEn.set as Mock).mock.calls.filter((call: any[]) => call[0] === 'fr');
     // All 'fr' calls must be actual string values, not GOOGLETRANSLATE formulas
-    frCalls.forEach(([, val]: [string, string]) => {
-      expect(val).not.toMatch(/^=GOOGLETRANSLATE/);
+    frCalls.forEach((call: any[]) => {
+      expect(call[1]).not.toMatch(/^=GOOGLETRANSLATE/);
     });
     expect(rowEn.set).toHaveBeenCalledWith('fr', 'Titre FR');
   });
@@ -748,5 +842,134 @@ describe('updateSpreadsheetWithLocalChanges', () => {
     expect(formula).toContain('="zh-"');
     // The guard ensures zh-TW → "zh-tw" (full) rather than just "zh"
     expect(formula).toContain('LOWER(');
+  });
+
+  test('should skip formula fill when source header cannot be found in headerRow', async () => {
+    mockRow.toObject.mockReturnValue({
+      key: 'existing',
+      en: 'Existing',
+      de: '',
+    });
+
+    const changes: TranslationData = {
+      // This locale maps to a header that does not exist in the current sheet headers,
+      // which drives sourceHeaderIndex to -1 and should safely continue.
+      'en-us': { home: { new_key: 'Hello' } },
+    };
+
+    await updateSpreadsheetWithLocalChanges(mockDoc, changes, 0, true, {
+      'en-us': 'en-US',
+      de: 'de',
+    });
+
+    const addedRows = mockSheet.addRows.mock.calls[0][0] as Array<Record<string, string>>;
+    const addedRow = addedRows[0];
+    expect(addedRow['en-US']).toBe('Hello');
+    expect(addedRow.de).toBeUndefined();
+  });
+
+  test('should warn and continue when new key map lookup unexpectedly returns undefined', async () => {
+    mockRow.toObject.mockReturnValue({ key: 'existing', en: 'Existing' });
+
+    const originalGet = Map.prototype.get;
+    const getSpy = vi.spyOn(Map.prototype, 'get').mockImplementation(function (
+      this: Map<unknown, unknown>,
+      key: unknown,
+    ) {
+      if (key === 'new_key') {
+        return undefined;
+      }
+      return originalGet.call(this, key);
+    });
+
+    const changes: TranslationData = {
+      en: { home: { new_key: 'Value' } },
+    };
+
+    await updateSpreadsheetWithLocalChanges(mockDoc, changes, 0, false, { en: 'en' });
+
+    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('not found in newKeys map'));
+
+    getSpy.mockRestore();
+  });
+
+  test('should throttle between addRows chunks when waitSeconds is positive', async () => {
+    vi.useFakeTimers();
+    mockRow.toObject.mockReturnValue({ key: 'existing', en: 'Existing' });
+
+    const keys: Record<string, string> = {};
+    for (let i = 0; i < 6; i += 1) {
+      keys[`new_key_${i}`] = `Value ${i}`;
+    }
+    const changes: TranslationData = {
+      en: { home: keys },
+    };
+
+    const promise = updateSpreadsheetWithLocalChanges(mockDoc, changes, 1, false);
+    await vi.advanceTimersByTimeAsync(1000);
+    await promise;
+    vi.useRealTimers();
+
+    expect(mockSheet.addRows).toHaveBeenCalledTimes(2);
+  });
+
+  test('should catch and log error when row.save fails', async () => {
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    mockRow.toObject.mockReturnValue({ key: 'existing_key', en: 'Old' });
+    mockRow.save.mockRejectedValueOnce(new Error('Quota exceeded'));
+
+    const changes: TranslationData = {
+      en: { home: { existing_key: 'New Value' } },
+    };
+
+    await updateSpreadsheetWithLocalChanges(mockDoc, changes, 0, false);
+    expect(consoleErrorSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Failed to save row for key "existing_key"'),
+      expect.any(Error),
+    );
+    consoleErrorSpy.mockRestore();
+  });
+
+  test('should safely continue when existing row autoTranslate targets a non-existent header', async () => {
+    mockRow.toObject.mockReturnValue({ key: 'existing_key', en: 'Value' });
+    // Header only has 'key' and 'en'
+    (mockSheet as any).headerValues = ['key', 'en'];
+
+    const changes: TranslationData = {
+      en: { home: { existing_key: 'Value Updated' } },
+    };
+
+    // 'fr' is passed in localeMapping, but sheet header doesn't have 'fr'
+    await updateSpreadsheetWithLocalChanges(mockDoc, changes, 0, true, { en: 'en', fr: 'fr' });
+    expect(mockRow.set).toHaveBeenCalledWith('en', 'Value Updated');
+  });
+});
+
+describe('columnIndexToLetter', () => {
+  test('converts 0-based column indices correctly for single letters A-Z', () => {
+    expect(columnIndexToLetter(0)).toBe('A');
+    expect(columnIndexToLetter(1)).toBe('B');
+    expect(columnIndexToLetter(25)).toBe('Z');
+  });
+
+  test('converts indices for two-letter columns AA-ZZ', () => {
+    expect(columnIndexToLetter(26)).toBe('AA');
+    expect(columnIndexToLetter(27)).toBe('AB');
+    expect(columnIndexToLetter(51)).toBe('AZ');
+    expect(columnIndexToLetter(52)).toBe('BA');
+    expect(columnIndexToLetter(701)).toBe('ZZ');
+  });
+
+  test('converts indices for three-letter columns AAA+', () => {
+    expect(columnIndexToLetter(702)).toBe('AAA');
+    expect(columnIndexToLetter(703)).toBe('AAB');
+  });
+
+  test('buildGoogleTranslateFormula builds correct translate formula', async () => {
+    const { buildGoogleTranslateFormula } = await import('../../src/utils/spreadsheetFormulas');
+    const formula = buildGoogleTranslateFormula('B', 'C', ';');
+    expect(formula).toContain('=GOOGLETRANSLATE(INDIRECT("B"&ROW());');
+    expect(formula).toContain('$B$1');
+    expect(formula).toContain('C$1');
   });
 });

@@ -1,9 +1,16 @@
-import { createWriteStream, mkdirSync, existsSync, readdirSync, unlinkSync, statSync } from 'node:fs';
+import {
+  createWriteStream,
+  mkdirSync,
+  existsSync,
+  readdirSync,
+  unlinkSync,
+  statSync,
+} from 'node:fs';
 import { join, dirname } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
-import { GoogleAuth } from 'google-auth-library';
 import type { GoogleEnvVars } from '../types';
+import { buildGoogleAuth, normalizePrivateKey } from './auth';
 
 export interface DriveImageSyncOptions {
   /** Google Drive root folder ID to sync images from */
@@ -21,6 +28,12 @@ export interface DriveImageSyncOptions {
    * Useful for patterns like `/^projects\//` or `/icons$/`.
    */
   folderPattern?: RegExp;
+  /**
+   * Optional regular expression to filter file names. Only files whose name
+   * matches this pattern will be downloaded.
+   * Example: `/^icon-/` or `/\.(png|svg)$/i`.
+   */
+  nameFilter?: RegExp;
   /** Google service account credentials (falls back to env vars) */
   credentials?: GoogleEnvVars;
   /** If true, delete local files that no longer exist in Drive (default: false) */
@@ -106,42 +119,42 @@ export function normalizeExtension(name: string): string {
   return `${base}.${ext}`;
 }
 
-async function getAccessToken(credentials?: GoogleEnvVars): Promise<string> {
-  const clientEmail =
-    credentials?.GOOGLE_CLIENT_EMAIL ?? process.env.GOOGLE_CLIENT_EMAIL;
-  const privateKey =
-    credentials?.GOOGLE_PRIVATE_KEY ?? process.env.GOOGLE_PRIVATE_KEY;
+const DRIVE_SCOPES = ['https://www.googleapis.com/auth/drive.readonly'];
 
-  if (!clientEmail || !privateKey) {
+async function getAccessToken(credentials?: GoogleEnvVars): Promise<string> {
+  const clientEmail = credentials?.GOOGLE_CLIENT_EMAIL ?? process.env.GOOGLE_CLIENT_EMAIL;
+  const privateKey = credentials?.GOOGLE_PRIVATE_KEY ?? process.env.GOOGLE_PRIVATE_KEY;
+
+  let driveCredentials: { client_email: string; private_key: string } | undefined;
+
+  if (clientEmail && privateKey) {
+    driveCredentials = { client_email: clientEmail, private_key: normalizePrivateKey(privateKey) };
+  } else if (!process.env.GOOGLE_APPLICATION_CREDENTIALS) {
     throw new Error(
-      'Google Drive credentials required: GOOGLE_CLIENT_EMAIL and GOOGLE_PRIVATE_KEY'
+      'Google Drive credentials required: set GOOGLE_CLIENT_EMAIL and GOOGLE_PRIVATE_KEY, ' +
+        'or set GOOGLE_APPLICATION_CREDENTIALS for Workload Identity Federation.',
     );
   }
 
-  const normalizedKey = privateKey.replace(/\\n/g, '\n');
-
-  const auth = new GoogleAuth({
-    credentials: { client_email: clientEmail, private_key: normalizedKey },
-    scopes: ['https://www.googleapis.com/auth/drive.readonly'],
-  });
-
+  // WIF / ADC path (driveCredentials is undefined) or service-account key path
+  const auth = buildGoogleAuth(DRIVE_SCOPES, driveCredentials);
   const client = await auth.getClient();
   const tokenResponse = await client.getAccessToken();
   return tokenResponse.token as string;
 }
 
+import { withRetry } from './rateLimiter';
+
 async function listFilesInFolder(
   folderId: string,
   token: string,
-  mimeTypeFilter?: string
+  mimeTypeFilter?: string,
 ): Promise<DriveFile[]> {
   const results: DriveFile[] = [];
   let pageToken: string | undefined;
 
   do {
-    const mimeClause = mimeTypeFilter
-      ? ` and mimeType = '${mimeTypeFilter}'`
-      : '';
+    const mimeClause = mimeTypeFilter ? ` and mimeType = '${mimeTypeFilter}'` : '';
     const query = `'${folderId}' in parents${mimeClause} and trashed = false`;
     const params = new URLSearchParams({
       q: query,
@@ -150,9 +163,13 @@ async function listFilesInFolder(
     });
     if (pageToken) params.set('pageToken', pageToken);
 
-    const response = await fetch(`${DRIVE_FILES_URL}?${params.toString()}`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
+    const response = await withRetry(
+      () =>
+        fetch(`${DRIVE_FILES_URL}?${params.toString()}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        }),
+      `listDriveFiles(${folderId})`,
+    );
 
     if (!response.ok) {
       const text = await response.text();
@@ -175,7 +192,8 @@ async function collectFiles(
   allowedMimeTypes: string[],
   recursive: boolean,
   folderPattern?: RegExp,
-  normalizeExts = true
+  normalizeExts = true,
+  nameFilter?: RegExp,
 ): Promise<FileEntry[]> {
   console.log(`[driveImageSync] Scanning folder: ${folderId} (path: "${folderRelPath}")`);
 
@@ -195,10 +213,12 @@ async function collectFiles(
         allowedMimeTypes,
         recursive,
         folderPattern,
-        normalizeExts
+        normalizeExts,
+        nameFilter,
       );
       entries.push(...subEntries);
     } else if (allowedMimeTypes.includes(item.mimeType)) {
+      if (nameFilter && !nameFilter.test(item.name)) continue;
       const localName = normalizeExts ? normalizeExtension(item.name) : item.name;
       const localPath = folderRelPath
         ? join(outputPath, folderRelPath, localName)
@@ -218,7 +238,10 @@ async function collectFiles(
 
 async function downloadFile(fileId: string, localPath: string, token: string): Promise<void> {
   const url = `${DRIVE_FILES_URL}/${fileId}?alt=media`;
-  const response = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+  const response = await withRetry(
+    () => fetch(url, { headers: { Authorization: `Bearer ${token}` } }),
+    `downloadDriveFile(${fileId})`,
+  );
 
   if (!response.ok) {
     throw new Error(`Failed to download ${fileId}: ${response.status}`);
@@ -229,7 +252,7 @@ async function downloadFile(fileId: string, localPath: string, token: string): P
   await pipeline(Readable.fromWeb(response.body as Parameters<typeof Readable.fromWeb>[0]), dest);
 }
 
-function collectLocalFiles(dir: string, base: string): string[] {
+function collectLocalFiles(dir: string): string[] {
   const results: string[] = [];
   if (!existsSync(dir)) return results;
 
@@ -237,7 +260,7 @@ function collectLocalFiles(dir: string, base: string): string[] {
     const fullPath = join(dir, entry);
     const stat = statSync(fullPath);
     if (stat.isDirectory()) {
-      results.push(...collectLocalFiles(fullPath, base));
+      results.push(...collectLocalFiles(fullPath));
     } else {
       results.push(fullPath);
     }
@@ -245,10 +268,7 @@ function collectLocalFiles(dir: string, base: string): string[] {
   return results;
 }
 
-async function runConcurrent<T>(
-  tasks: (() => Promise<T>)[],
-  concurrency: number
-): Promise<T[]> {
+async function runConcurrent<T>(tasks: (() => Promise<T>)[], concurrency: number): Promise<T[]> {
   const results: T[] = [];
   for (let i = 0; i < tasks.length; i += concurrency) {
     const batch = tasks.slice(i, i + concurrency).map((t) => t());
@@ -270,7 +290,7 @@ async function runConcurrent<T>(
  * });
  */
 export async function syncDriveImages(
-  options: DriveImageSyncOptions
+  options: DriveImageSyncOptions,
 ): Promise<DriveImageSyncResult> {
   const {
     folderId,
@@ -278,6 +298,7 @@ export async function syncDriveImages(
     mimeTypes = DEFAULT_IMAGE_MIME_TYPES,
     recursive = true,
     folderPattern,
+    nameFilter,
     credentials,
     cleanSync = false,
     concurrency = 3,
@@ -297,7 +318,8 @@ export async function syncDriveImages(
     mimeTypes,
     recursive,
     folderPattern,
-    normalizeExtensions
+    normalizeExtensions,
+    nameFilter,
   );
 
   const downloaded: string[] = [];
@@ -348,7 +370,7 @@ export async function syncDriveImages(
   const deleted: string[] = [];
   if (cleanSync) {
     const driveLocalPaths = new Set(entries.map((e) => e.localPath));
-    const localFiles = collectLocalFiles(outputPath, outputPath);
+    const localFiles = collectLocalFiles(outputPath);
     for (const localFile of localFiles) {
       if (!driveLocalPaths.has(localFile)) {
         console.log(`[driveImageSync] Deleting (not in Drive): ${localFile}`);
@@ -359,7 +381,7 @@ export async function syncDriveImages(
   }
 
   console.log(
-    `[driveImageSync] Synced ${downloaded.length} files, skipped ${skipped.length}, deleted ${deleted.length}, errors ${errors.length}`
+    `[driveImageSync] Synced ${downloaded.length} files, skipped ${skipped.length}, deleted ${deleted.length}, errors ${errors.length}`,
   );
 
   return { downloaded, skipped, deleted, errors };

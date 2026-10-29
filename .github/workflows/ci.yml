@@ -18,15 +18,15 @@ jobs:
       contents: read
     strategy:
       matrix:
-        node-version: [20, 22, 24]
+        node-version: [22, 24]
       fail-fast: false
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Setup Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node-version }}
           cache: npm
@@ -35,16 +35,40 @@ jobs:
         run: npm ci
 
       - name: Audit dependencies
-        run: npm audit --omit=dev --audit-level=high
+        run: |
+          for i in 1 2 3; do
+            if npm audit --omit=dev --audit-level=high; then
+              exit 0
+            fi
+            echo "npm audit attempt $i failed, retrying in 5s..."
+            sleep 5
+          done
+          # If still failing, check if it was due to registry service availability
+          if npm audit --omit=dev --audit-level=high 2>&1 | grep -qE "503 Service Unavailable|ENOTFOUND|ECONNRESET|ETIMEDOUT"; then
+            echo "::warning::npm registry audit endpoint unavailable (transient 5xx/network error); skipping audit failure."
+            exit 0
+          fi
+          exit 1
 
       - name: Lint
         run: npm run lint
 
+      - name: Check formatting
+        run: npm run format:check
+
       - name: Build
         run: npm run build
 
+      - name: Build action bundle
+        if: matrix.node-version == '22'
+        run: npm run build:action
+
       - name: Test
         run: npm test
+
+      - name: Provider parity matrix
+        if: matrix.node-version == '22'
+        run: npm run test:provider-matrix
 
       - name: Integration test (public spreadsheet connectivity)
         if: matrix.node-version == '22'

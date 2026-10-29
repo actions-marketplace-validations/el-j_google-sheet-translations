@@ -8,11 +8,21 @@ branding:
 
 inputs:
   google-client-email:
-    description: 'Google service-account client e-mail (GOOGLE_CLIENT_EMAIL)'
-    required: true
+    description: >
+      Google service-account client e-mail (GOOGLE_CLIENT_EMAIL).
+      Required when using classic service-account key authentication.
+      Omit when using Workload Identity Federation (WIF) — use
+      google-github-actions/auth before this action instead.
+    required: false
+    default: ''
   google-private-key:
-    description: 'Google service-account private key (GOOGLE_PRIVATE_KEY)'
-    required: true
+    description: >
+      Google service-account private key (GOOGLE_PRIVATE_KEY).
+      Required when using classic service-account key authentication.
+      Omit when using Workload Identity Federation (WIF) — use
+      google-github-actions/auth before this action instead.
+    required: false
+    default: ''
   google-spreadsheet-id:
     description: 'ID of the Google Spreadsheet (GOOGLE_SPREADSHEET_ID). If omitted and auto-create is true, a new spreadsheet is created automatically.'
     required: false
@@ -134,6 +144,31 @@ inputs:
     description: 'Local directory to download Drive images into'
     required: false
     default: './public/remote-images'
+  provider-config:
+    description: >
+      JSON string for v3 provider runtime config. Example:
+      {"input":{"provider":"cryptpad-csv","options":{"sources":[{"tableName":"home","url":"https://cryptpad.fr/..."}]}}}
+      Mutually exclusive with provider-config-path.
+    required: false
+    default: ''
+  provider-config-path:
+    description: >
+      Path (relative to repository root) to a JSON file containing v3 provider
+      runtime config. Mutually exclusive with provider-config.
+    required: false
+    default: ''
+  asset-target-dir:
+    description: >
+      Directory to write downloaded assets to when using v3 provider asset sync
+      (requires "assetSync" provider slot in provider config).
+    required: false
+    default: ''
+  asset-delete-missing:
+    description: >
+      When "true", deletes local files in asset-target-dir that are not present
+      in the asset manifest during v3 provider asset sync.
+    required: false
+    default: 'false'
 
 outputs:
   translations-dir:

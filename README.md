@@ -15,7 +15,7 @@ A Node.js package for managing translations stored in Google Sheets.
 - ✅ **Smart Locale Filtering**: Only locales with actual translations in content sheets are included in output files
 - ✅ **TypeScript Support**: Full TypeScript definitions included
 - ✅ **Modular Architecture**: Well-tested, maintainable codebase with clear separation of concerns
-- ✅ **Next.js Integration**: Built-in support for Next.js static export workflows
+- ✅ **Next.js & Astro Integration**: Built-in support for Next.js static export workflows and Astro build-time hooks
 - ✅ **Flexible Configuration**: Customizable paths, wait times, and processing options
 - ✅ **GitHub Action**: One-step CI integration via `el-j/google-sheet-translations@v2` — see [GitHub Action](#github-action)
 
@@ -291,6 +291,7 @@ For more detailed examples, check out the [examples directory](examples) where y
 - Bidirectional sync
 - Auto-translation
 - Next.js integration
+- Astro integration
 
 ## GitHub Action
 
@@ -378,6 +379,25 @@ jobs:
 | `spreadsheet-title` | ❌ | `google-sheet-translations` | Title for the auto-created spreadsheet |
 | `source-locale` | ❌ | `en` | Source locale used as the base for auto-translate formulas |
 | `target-locales` | ❌ | `de,fr,es,it,pt,ja,zh` | Comma-separated target locales added to the auto-created spreadsheet |
+| `drive-folder-id` | ❌ | `''` | Drive folder ID used to auto-discover spreadsheets, docs, and images |
+| `scan-for-spreadsheets` | ❌ | `true` | When `drive-folder-id` is set, scan the folder recursively for spreadsheets |
+| `spreadsheet-ids` | ❌ | `''` | Optional extra spreadsheet IDs to merge with any IDs discovered in Drive |
+| `sync-images` | ❌ | `false` | Download Drive images alongside translation sync |
+| `image-output-path` | ❌ | `./public/remote-images` | Output directory for downloaded Drive images when `sync-images` is enabled |
+| `provider-config` | ❌ | `''` | Inline JSON for v3 provider runtime config (mutually exclusive with `provider-config-path`) |
+| `provider-config-path` | ❌ | `''` | Path to provider runtime config JSON file in the repo (mutually exclusive with `provider-config`) |
+
+### Drive Folder Mode
+
+When `drive-folder-id` is set, the action switches from single-spreadsheet mode to `manageDriveTranslations()`. That enables recursive spreadsheet discovery, optional image sync, and optional explicit `spreadsheet-ids` on the same run.
+
+Operational notes:
+
+- If the Drive folder is empty and `auto-create` remains enabled, the package creates a spreadsheet and then tries to move it into the target folder.
+- `spreadsheetNameFilter` only applies to discovered sheets in the programmatic API. Explicit `spreadsheet-ids` are never filtered out.
+- `sync-images` supports incremental freshness checks and optional `cleanSync` deletion in the programmatic API. See the Drive Folder guide for those semantics before enabling destructive cleanup.
+
+See the full Drive Folder guide in `website/guide/drive-folder.md` for the complete API surface, image sync semantics, and Google Doc ingestion details.
 
 ### Outputs
 
@@ -386,6 +406,46 @@ jobs:
 | `translations-dir` | Absolute path of the directory containing locale JSON files |
 | `locales-file` | Absolute path of the generated `locales.ts` |
 | `data-json-file` | Absolute path of the `languageData.json` snapshot |
+
+## Provider Runtime CLI (v3)
+
+In addition to `gst-setup-wif`, the package ships `gst-run-provider` for provider-config driven execution:
+
+```bash
+gst-run-provider --config=provider.config.json --sheet-titles=home,about
+```
+
+For existing workflows, use `gst-migrate-v3` to generate provider config from legacy action inputs:
+
+```bash
+gst-migrate-v3 --dry-run
+gst-migrate-v3 --dry-run --parity-check
+gst-migrate-v3 --write-workflows --provider-config-path=.github/provider.config.json
+```
+
+If a config already exists and should be replaced:
+
+```bash
+gst-migrate-v3 --force --provider-config-path=.github/provider.config.json
+```
+
+Example `provider.config.json` for CryptPad CSV input:
+
+```json
+{
+  "input": {
+    "provider": "cryptpad-csv",
+    "options": {
+      "sources": [
+        {
+          "tableName": "home",
+          "url": "https://cryptpad.fr/.../export.csv"
+        }
+      ]
+    }
+  }
+}
+```
 
 ### Auto-Create Feature
 

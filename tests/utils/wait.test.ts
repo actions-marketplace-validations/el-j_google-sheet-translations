@@ -1,31 +1,35 @@
-jest.mock('node:timers/promises', () => ({
-  setTimeout: jest.fn(),
+vi.mock('node:timers/promises', () => ({
+  setTimeout: vi.fn(),
 }));
 
 import { wait } from '../../src/utils/wait';
 import { setTimeout as mockDelay } from 'node:timers/promises';
 
-const mockDelayFn = mockDelay as jest.MockedFunction<typeof mockDelay>;
+const mockDelayFn = mockDelay as MockedFunction<typeof mockDelay>;
 
 describe('wait', () => {
   beforeEach(() => {
-    jest.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'log').mockImplementation(() => {});
     mockDelayFn.mockReset();
   });
 
   afterEach(() => {
-    jest.restoreAllMocks();
+    vi.restoreAllMocks();
   });
 
   test('should wait for the specified number of seconds', async () => {
     let resolveDelay!: () => void;
     mockDelayFn.mockReturnValueOnce(
-      new Promise<void>(resolve => { resolveDelay = resolve; })
+      new Promise<void>((resolve) => {
+        resolveDelay = resolve;
+      }),
     );
 
     const waitPromise = wait(2, 'test wait');
     let resolved = false;
-    waitPromise.then(() => { resolved = true; });
+    waitPromise.then(() => {
+      resolved = true;
+    });
 
     // Before resolving the delay, promise should still be pending
     await Promise.resolve();

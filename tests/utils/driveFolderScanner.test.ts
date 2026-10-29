@@ -1,14 +1,14 @@
 import { scanDriveFolderForSpreadsheets } from '../../src/utils/driveFolderScanner';
 
-jest.mock('google-auth-library', () => ({
-  GoogleAuth: jest.fn().mockImplementation(() => ({
-    getClient: jest.fn().mockResolvedValue({
-      getAccessToken: jest.fn().mockResolvedValue({ token: 'mock-token' }),
-    }),
-  })),
+vi.mock('google-auth-library', () => ({
+  GoogleAuth: vi.fn().mockImplementation(function (this: any) {
+    this.getClient = vi.fn().mockResolvedValue({
+      getAccessToken: vi.fn().mockResolvedValue({ token: 'mock-token' }),
+    });
+  }),
 }));
 
-const mockFetch = jest.fn();
+const mockFetch = vi.fn();
 global.fetch = mockFetch;
 
 const SPREADSHEET_MIME = 'application/vnd.google-apps.spreadsheet';
@@ -29,14 +29,14 @@ function mockOkResponse(files: object[], nextPageToken?: string) {
 }
 
 beforeEach(() => {
-  jest.clearAllMocks();
+  vi.clearAllMocks();
 });
 
 describe('scanDriveFolderForSpreadsheets', () => {
   it('returns empty array when folder has no spreadsheets', async () => {
     mockFetch
-      .mockResolvedValueOnce(mockOkResponse([]))   // spreadsheets in root
-      .mockResolvedValueOnce(mockOkResponse([]));  // subfolders in root
+      .mockResolvedValueOnce(mockOkResponse([])) // spreadsheets in root
+      .mockResolvedValueOnce(mockOkResponse([])); // subfolders in root
 
     const result = await scanDriveFolderForSpreadsheets({
       folderId: 'root-id',
@@ -48,7 +48,12 @@ describe('scanDriveFolderForSpreadsheets', () => {
 
   it('returns spreadsheets found in root folder', async () => {
     const files = [
-      { id: 'sheet1', name: 'Translations', mimeType: SPREADSHEET_MIME, modifiedTime: '2024-01-01' },
+      {
+        id: 'sheet1',
+        name: 'Translations',
+        mimeType: SPREADSHEET_MIME,
+        modifiedTime: '2024-01-01',
+      },
       { id: 'sheet2', name: 'Config', mimeType: SPREADSHEET_MIME, modifiedTime: '2024-01-02' },
     ];
 
@@ -72,10 +77,10 @@ describe('scanDriveFolderForSpreadsheets', () => {
     const subSheets = [{ id: 'sub-sheet', name: 'Sub Translations', mimeType: SPREADSHEET_MIME }];
 
     mockFetch
-      .mockResolvedValueOnce(mockOkResponse(rootSheets))   // root spreadsheets
-      .mockResolvedValueOnce(mockOkResponse(subfolders))   // root subfolders
-      .mockResolvedValueOnce(mockOkResponse(subSheets))    // subfolder spreadsheets
-      .mockResolvedValueOnce(mockOkResponse([]));          // subfolder subfolders
+      .mockResolvedValueOnce(mockOkResponse(rootSheets)) // root spreadsheets
+      .mockResolvedValueOnce(mockOkResponse(subfolders)) // root subfolders
+      .mockResolvedValueOnce(mockOkResponse(subSheets)) // subfolder spreadsheets
+      .mockResolvedValueOnce(mockOkResponse([])); // subfolder subfolders
 
     const result = await scanDriveFolderForSpreadsheets({
       folderId: 'root-id',
@@ -83,8 +88,8 @@ describe('scanDriveFolderForSpreadsheets', () => {
     });
 
     expect(result).toHaveLength(2);
-    expect(result.find(f => f.id === 'root-sheet')?.folderPath).toBe('');
-    expect(result.find(f => f.id === 'sub-sheet')?.folderPath).toBe('SubProject');
+    expect(result.find((f) => f.id === 'root-sheet')?.folderPath).toBe('');
+    expect(result.find((f) => f.id === 'sub-sheet')?.folderPath).toBe('SubProject');
   });
 
   it('builds nested folderPath for deeply nested subfolders', async () => {
@@ -93,12 +98,12 @@ describe('scanDriveFolderForSpreadsheets', () => {
     const level2Sheets = [{ id: 'deep-sheet', name: 'Deep', mimeType: SPREADSHEET_MIME }];
 
     mockFetch
-      .mockResolvedValueOnce(mockOkResponse([]))             // root spreadsheets
+      .mockResolvedValueOnce(mockOkResponse([])) // root spreadsheets
       .mockResolvedValueOnce(mockOkResponse(rootSubfolders)) // root subfolders
-      .mockResolvedValueOnce(mockOkResponse([]))             // level1 spreadsheets
+      .mockResolvedValueOnce(mockOkResponse([])) // level1 spreadsheets
       .mockResolvedValueOnce(mockOkResponse(level1Subfolders)) // level1 subfolders
-      .mockResolvedValueOnce(mockOkResponse(level2Sheets))   // level2 spreadsheets
-      .mockResolvedValueOnce(mockOkResponse([]));            // level2 subfolders
+      .mockResolvedValueOnce(mockOkResponse(level2Sheets)) // level2 spreadsheets
+      .mockResolvedValueOnce(mockOkResponse([])); // level2 subfolders
 
     const result = await scanDriveFolderForSpreadsheets({ folderId: 'root-id', credentials });
 
@@ -124,7 +129,7 @@ describe('scanDriveFolderForSpreadsheets', () => {
     });
 
     expect(result).toHaveLength(2);
-    expect(result.every(f => f.name.includes('Translations'))).toBe(true);
+    expect(result.every((f) => f.name.includes('Translations'))).toBe(true);
   });
 
   it('follows pagination (nextPageToken) until exhausted', async () => {
@@ -133,13 +138,13 @@ describe('scanDriveFolderForSpreadsheets', () => {
 
     mockFetch
       .mockResolvedValueOnce(mockOkResponse(page1Files, 'token-page2'))
-      .mockResolvedValueOnce(mockOkResponse(page2Files))   // second page, no token
-      .mockResolvedValueOnce(mockOkResponse([]));          // subfolders
+      .mockResolvedValueOnce(mockOkResponse(page2Files)) // second page, no token
+      .mockResolvedValueOnce(mockOkResponse([])); // subfolders
 
     const result = await scanDriveFolderForSpreadsheets({ folderId: 'root-id', credentials });
 
     expect(result).toHaveLength(2);
-    expect(result.map(f => f.id)).toEqual(['sheet1', 'sheet2']);
+    expect(result.map((f) => f.id)).toEqual(['sheet1', 'sheet2']);
   });
 
   it('non-recursive mode does NOT recurse into subfolders', async () => {
@@ -161,15 +166,36 @@ describe('scanDriveFolderForSpreadsheets', () => {
   it('throws on missing credentials', async () => {
     const origEmail = process.env.GOOGLE_CLIENT_EMAIL;
     const origKey = process.env.GOOGLE_PRIVATE_KEY;
+    const origAppCreds = process.env.GOOGLE_APPLICATION_CREDENTIALS;
     delete process.env.GOOGLE_CLIENT_EMAIL;
     delete process.env.GOOGLE_PRIVATE_KEY;
+    delete process.env.GOOGLE_APPLICATION_CREDENTIALS;
 
-    await expect(
-      scanDriveFolderForSpreadsheets({ folderId: 'root-id' })
-    ).rejects.toThrow('Google Drive credentials required');
+    await expect(scanDriveFolderForSpreadsheets({ folderId: 'root-id' })).rejects.toThrow(
+      'Google Drive credentials required',
+    );
 
     process.env.GOOGLE_CLIENT_EMAIL = origEmail;
     process.env.GOOGLE_PRIVATE_KEY = origKey;
+    process.env.GOOGLE_APPLICATION_CREDENTIALS = origAppCreds;
+  });
+
+  it('uses GOOGLE_APPLICATION_CREDENTIALS fallback when inline credentials are not provided', async () => {
+    const origEmail = process.env.GOOGLE_CLIENT_EMAIL;
+    const origKey = process.env.GOOGLE_PRIVATE_KEY;
+    const origAppCreds = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+    delete process.env.GOOGLE_CLIENT_EMAIL;
+    delete process.env.GOOGLE_PRIVATE_KEY;
+    process.env.GOOGLE_APPLICATION_CREDENTIALS = '/path/to/wif.json';
+
+    mockFetch.mockResolvedValueOnce(mockOkResponse([])).mockResolvedValueOnce(mockOkResponse([]));
+
+    const result = await scanDriveFolderForSpreadsheets({ folderId: 'root-id' });
+    expect(result).toEqual([]);
+
+    process.env.GOOGLE_CLIENT_EMAIL = origEmail;
+    process.env.GOOGLE_PRIVATE_KEY = origKey;
+    process.env.GOOGLE_APPLICATION_CREDENTIALS = origAppCreds;
   });
 
   it('throws on Drive API error response (non-2xx)', async () => {
@@ -180,7 +206,7 @@ describe('scanDriveFolderForSpreadsheets', () => {
     });
 
     await expect(
-      scanDriveFolderForSpreadsheets({ folderId: 'root-id', credentials })
+      scanDriveFolderForSpreadsheets({ folderId: 'root-id', credentials }),
     ).rejects.toThrow('Drive API error 403');
   });
 
@@ -189,10 +215,10 @@ describe('scanDriveFolderForSpreadsheets', () => {
     const subfolders = [{ id: 'sub-id', name: 'Sub', mimeType: FOLDER_MIME }];
 
     mockFetch
-      .mockResolvedValueOnce(mockOkResponse([file]))         // root sheets (has dup-sheet)
-      .mockResolvedValueOnce(mockOkResponse(subfolders))     // root subfolders
-      .mockResolvedValueOnce(mockOkResponse([file]))         // sub sheets (same dup-sheet)
-      .mockResolvedValueOnce(mockOkResponse([]));            // sub subfolders
+      .mockResolvedValueOnce(mockOkResponse([file])) // root sheets (has dup-sheet)
+      .mockResolvedValueOnce(mockOkResponse(subfolders)) // root subfolders
+      .mockResolvedValueOnce(mockOkResponse([file])) // sub sheets (same dup-sheet)
+      .mockResolvedValueOnce(mockOkResponse([])); // sub subfolders
 
     const result = await scanDriveFolderForSpreadsheets({ folderId: 'root-id', credentials });
 

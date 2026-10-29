@@ -8,13 +8,17 @@ on:
   workflow_run:
     workflows: ["Release"]
     types: [completed]
-    branches: [main]
+    branches:
+      - main
+      - develop
 
   # Secondary trigger: website / script changes that are not part of a release
   # (e.g. fixing a typo in a doc page). src/** and tests/** are intentionally
   # omitted here — those changes go through the Release workflow first.
   push:
-    branches: [main]
+    branches:
+      - main
+      - develop
     paths:
       - 'website/**'
       - 'scripts/**'
@@ -47,18 +51,23 @@ jobs:
       github.event.workflow_run.conclusion == 'success'
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
-          # When triggered by workflow_run, check out main HEAD so we get the
+          # When triggered by workflow_run, check out head branch so we get the
           # version-bumped package.json committed by semantic-release.
           # For push / workflow_dispatch, use the SHA that triggered this run.
-          ref: ${{ github.event_name == 'workflow_run' && 'main' || github.sha }}
+          ref: ${{ github.event_name == 'workflow_run' && (github.event.workflow_run.head_branch || 'main') || github.sha }}
           fetch-depth: 0
 
+      - name: Fetch branches for multi-version docs
+        run: |
+          git fetch origin main:refs/remotes/origin/main || true
+          git fetch origin develop:refs/remotes/origin/develop || true
+
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - name: Install dependencies
@@ -71,12 +80,13 @@ jobs:
         id: sync_creds
         env:
           _MAIL: ${{ secrets.GOOGLE_CLIENT_EMAIL }}
+          _ADC: ${{ secrets.GOOGLE_APPLICATION_CREDENTIALS }}
         run: |
-          if [ -n "$_MAIL" ]; then
+          if [ -n "$_MAIL" ] || [ -n "$_ADC" ]; then
             echo "has_creds=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_creds=false" >> "$GITHUB_OUTPUT"
-            echo "[sync] No credentials found – skipping translation sync (secrets 'GOOGLE_CLIENT_EMAIL' / 'GOOGLE_PRIVATE_KEY' / 'GOOGLE_SPREADSHEET_ID' not set)"
+            echo "[sync] No credentials found – skipping translation sync (set GOOGLE_CLIENT_EMAIL+GOOGLE_PRIVATE_KEY or GOOGLE_APPLICATION_CREDENTIALS secret)"
           fi
 
       - name: Sync translations to demo spreadsheet
@@ -84,28 +94,38 @@ jobs:
         env:
           GOOGLE_CLIENT_EMAIL: ${{ secrets.GOOGLE_CLIENT_EMAIL }}
           GOOGLE_PRIVATE_KEY: ${{ secrets.GOOGLE_PRIVATE_KEY }}
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ secrets.GOOGLE_APPLICATION_CREDENTIALS }}
           GOOGLE_SPREADSHEET_ID: ${{ secrets.GOOGLE_SPREADSHEET_ID }}
         run: node scripts/sync-demo-translations.mjs
 
       - name: Verify translations were pushed
         if: steps.sync_creds.outputs.has_creds == 'true'
         env:
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ secrets.GOOGLE_APPLICATION_CREDENTIALS }}
           GOOGLE_SPREADSHEET_ID: ${{ secrets.GOOGLE_SPREADSHEET_ID }}
         run: node scripts/verify-demo-translations.mjs
 
-      - name: Build with VitePress
-        run: npm run docs:build
+      - name: Download existing gh-pages artifact for version archival
+        uses: actions/checkout@v7
+        with:
+          ref: gh-pages
+          path: _previous_pages
+        continue-on-error: true
+
+      - name: Build multi-version documentation bundle
+        run: npm run docs:bundle
 
       - name: Setup GitHub Pages
         uses: actions/configure-pages@v6
 
       - name: Upload artifact
-        uses: actions/upload-pages-artifact@v4
+        uses: actions/upload-pages-artifact@v5
         with:
           path: website/.vitepress/dist
 
   deploy:
     name: Deploy to GitHub Pages
+    if: github.ref == 'refs/heads/main' || github.event.workflow_run.head_branch == 'main'
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

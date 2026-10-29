@@ -1,11 +1,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { buildManifest, writeManifest } from '../../src/utils/driveProjectIndex';
+import { buildManifest, writeManifest, readManifest } from '../../src/utils/driveProjectIndex';
 import type { BuildManifestOptions, DriveProjectManifest } from '../../src/utils/driveProjectIndex';
 import type { TranslationData } from '../../src/types';
 
-jest.mock('node:fs');
-const mockFs = fs as jest.Mocked<typeof fs>;
+vi.mock('node:fs');
+const mockFs = fs as Mocked<typeof fs>;
 
 const TRANSLATIONS: TranslationData = {
   fr: { home: { title: 'Accueil' } },
@@ -14,19 +14,35 @@ const TRANSLATIONS: TranslationData = {
 };
 
 const SPREADSHEETS = [
-  { id: 'ss-1', name: 'app-i18n', folderPath: '', sheets: ['home'], modifiedTime: '2026-01-01T00:00:00.000Z' },
+  {
+    id: 'ss-1',
+    name: 'app-i18n',
+    folderPath: '',
+    sheets: ['home'],
+    modifiedTime: '2026-01-01T00:00:00.000Z',
+  },
   { id: 'ss-2', name: 'marketing', folderPath: 'campaigns', sheets: ['landing'] },
 ];
 
 describe('buildManifest', () => {
   it('includes version "1"', () => {
-    const manifest = buildManifest({ translations: TRANSLATIONS, spreadsheets: SPREADSHEETS, outputDirectory: './translations', flatten: true });
+    const manifest = buildManifest({
+      translations: TRANSLATIONS,
+      spreadsheets: SPREADSHEETS,
+      outputDirectory: './translations',
+      flatten: true,
+    });
     expect(manifest.version).toBe('1');
   });
 
   it('sets generatedAt to a valid ISO timestamp', () => {
     const before = Date.now();
-    const manifest = buildManifest({ translations: TRANSLATIONS, spreadsheets: SPREADSHEETS, outputDirectory: './t', flatten: true });
+    const manifest = buildManifest({
+      translations: TRANSLATIONS,
+      spreadsheets: SPREADSHEETS,
+      outputDirectory: './t',
+      flatten: true,
+    });
     const after = Date.now();
     const ts = new Date(manifest.generatedAt).getTime();
     expect(ts).toBeGreaterThanOrEqual(before);
@@ -34,12 +50,22 @@ describe('buildManifest', () => {
   });
 
   it('sorts locales alphabetically', () => {
-    const manifest = buildManifest({ translations: TRANSLATIONS, spreadsheets: SPREADSHEETS, outputDirectory: './t', flatten: true });
+    const manifest = buildManifest({
+      translations: TRANSLATIONS,
+      spreadsheets: SPREADSHEETS,
+      outputDirectory: './t',
+      flatten: true,
+    });
     expect(manifest.locales).toEqual(['de', 'en', 'fr']);
   });
 
   it('returns empty locales array when translations is empty', () => {
-    const manifest = buildManifest({ translations: {}, spreadsheets: [], outputDirectory: './t', flatten: true });
+    const manifest = buildManifest({
+      translations: {},
+      spreadsheets: [],
+      outputDirectory: './t',
+      flatten: true,
+    });
     expect(manifest.locales).toEqual([]);
   });
 
@@ -61,7 +87,12 @@ describe('buildManifest', () => {
   });
 
   it('leaves optional fields undefined when not provided', () => {
-    const manifest = buildManifest({ translations: {}, spreadsheets: [], outputDirectory: './t', flatten: true });
+    const manifest = buildManifest({
+      translations: {},
+      spreadsheets: [],
+      outputDirectory: './t',
+      flatten: true,
+    });
     expect(manifest.projectName).toBeUndefined();
     expect(manifest.domain).toBeUndefined();
     expect(manifest.defaultLocale).toBeUndefined();
@@ -69,24 +100,39 @@ describe('buildManifest', () => {
   });
 
   it('reflects flatten: false in the manifest', () => {
-    const manifest = buildManifest({ translations: {}, spreadsheets: [], outputDirectory: './t', flatten: false });
+    const manifest = buildManifest({
+      translations: {},
+      spreadsheets: [],
+      outputDirectory: './t',
+      flatten: false,
+    });
     expect(manifest.flatten).toBe(false);
   });
 
   it('includes spreadsheets array verbatim', () => {
-    const manifest = buildManifest({ translations: TRANSLATIONS, spreadsheets: SPREADSHEETS, outputDirectory: './t', flatten: true });
+    const manifest = buildManifest({
+      translations: TRANSLATIONS,
+      spreadsheets: SPREADSHEETS,
+      outputDirectory: './t',
+      flatten: true,
+    });
     expect(manifest.spreadsheets).toBe(SPREADSHEETS);
   });
 
   it('sets outputDirectory', () => {
-    const manifest = buildManifest({ translations: {}, spreadsheets: [], outputDirectory: './custom/path', flatten: true });
+    const manifest = buildManifest({
+      translations: {},
+      spreadsheets: [],
+      outputDirectory: './custom/path',
+      flatten: true,
+    });
     expect(manifest.outputDirectory).toBe('./custom/path');
   });
 });
 
 describe('writeManifest', () => {
   beforeEach(() => {
-    jest.clearAllMocks();
+    vi.clearAllMocks();
     mockFs.existsSync.mockReturnValue(false);
   });
 
@@ -125,9 +171,47 @@ describe('writeManifest', () => {
   });
 
   it('logs the output path after writing', () => {
-    const logSpy = jest.spyOn(console, 'log').mockImplementation();
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     writeManifest(MANIFEST, './out/manifest.json');
     expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('./out/manifest.json'));
     logSpy.mockRestore();
+  });
+});
+
+// ── readManifest ──────────────────────────────────────────────────────────────
+
+describe('readManifest', () => {
+  it('returns the parsed manifest when the file exists', () => {
+    const manifest: DriveProjectManifest = {
+      version: '1',
+      generatedAt: '2026-01-01T00:00:00.000Z',
+      locales: ['de', 'en'],
+      spreadsheets: [],
+      outputDirectory: './translations',
+      flatten: true,
+    };
+    mockFs.readFileSync.mockReturnValueOnce(Buffer.from(JSON.stringify(manifest)) as any);
+
+    const result = readManifest('./translations/i18n-manifest.json');
+
+    expect(result).toEqual(manifest);
+  });
+
+  it('returns undefined when the file does not exist', () => {
+    mockFs.readFileSync.mockImplementationOnce(() => {
+      throw new Error('ENOENT: no such file or directory');
+    });
+
+    const result = readManifest('./non-existent-path/manifest.json');
+
+    expect(result).toBeUndefined();
+  });
+
+  it('returns undefined when the file contains invalid JSON', () => {
+    mockFs.readFileSync.mockReturnValueOnce(Buffer.from('not-json') as any);
+
+    const result = readManifest('./broken/manifest.json');
+
+    expect(result).toBeUndefined();
   });
 });

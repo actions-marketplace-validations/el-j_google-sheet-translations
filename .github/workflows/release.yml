@@ -1,72 +1,40 @@
 # Release workflow
 #
-# Gate: A full `quality-gate` job (multi-node test matrix) MUST pass before the
-#       semantic-release step is allowed to run. This prevents broken releases.
-#
-# Triggered: push to main / develop / next (same branches as CI)
+# Gate: Runs only after the CI workflow succeeds on main / develop / next.
+# This avoids re-running the full quality matrix inside the release workflow.
 
 name: Release
 
 on:
-  push:
+  workflow_dispatch:
+    inputs:
+      force_beta_prerelease:
+        description: 'Force a new beta prerelease on develop even when no code commits were added.'
+        required: false
+        default: false
+        type: boolean
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
     branches:
       - main
       - develop
       - next
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ github.event.workflow_run.head_branch || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
-  # ────────────────────────────────────────────────────────────────────────────
-  # QUALITY GATE – must pass on ALL nodes before release is allowed
-  # ────────────────────────────────────────────────────────────────────────────
-  quality-gate:
-    name: Quality Gate (Node ${{ matrix.node-version }})
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-
-    strategy:
-      matrix:
-        node-version: [20, 22, 24]
-      fail-fast: true   # fail fast so we don't waste minutes on a broken build
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Setup Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@v6
-        with:
-          node-version: ${{ matrix.node-version }}
-          cache: npm
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Audit production dependencies
-        # Only audit production deps – devDep vulnerabilities in the npm CLI
-        # bundled inside @semantic-release/npm are unfixable from our side.
-        run: npm audit --omit=dev --audit-level=high
-
-      - name: Lint
-        run: npm run lint
-
-      - name: Build
-        run: npm run build
-
-      - name: Test
-        run: npm test
-
-  # ────────────────────────────────────────────────────────────────────────────
-  # RELEASE – only runs when every quality-gate matrix leg succeeds
-  # ────────────────────────────────────────────────────────────────────────────
   release:
+    environment: 
+      name: production
     name: Semantic Release
     runs-on: ubuntu-latest
-    needs: [quality-gate]   # ← blocks release until all quality gates pass
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push')
 
     permissions:
       contents: write       # create tags + commits
@@ -76,13 +44,33 @@ jobs:
 
     steps:
       - name: Checkout (full history required by semantic-release)
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
+          ref: ${{ github.event.workflow_run.head_branch || github.ref_name }}
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Fetch all branches and tags for semantic-release
+        run: |
+          TARGET_BRANCH="${{ github.event.workflow_run.head_branch || github.ref_name }}"
+          echo "Target branch: $TARGET_BRANCH"
+          # Fetch and force-update tags so floating tags never cause git fetch rejection
+          git fetch --tags --force --prune
+          # Fetch semantic-release notes so prerelease channel associations are preserved
+          git fetch origin "+refs/notes/*:refs/notes/*" || true
+          for remote in $(git branch -r | grep -v '\->'); do
+            branch="${remote#origin/}"
+            if [ "$branch" != "$TARGET_BRANCH" ]; then
+              git branch --track "$branch" "$remote" 2>/dev/null || true
+            fi
+          done
+          git checkout -B "$TARGET_BRANCH" "origin/$TARGET_BRANCH"
+          # Ensure local tags match remote exactly
+          git fetch --tags --force
+          git status
+
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -96,34 +84,89 @@ jobs:
       - name: Build action bundle
         run: npm run build:action
 
+      - name: Force beta prerelease when requested
+        if: github.event_name == 'workflow_dispatch' && github.ref_name == 'develop' && inputs.force_beta_prerelease
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          CURRENT_VERSION=$(node -p "require('./package.json').version")
+          NEXT_VERSION=$(npx semver "$CURRENT_VERSION" -i prerelease --preid beta)
+
+          while git ls-remote --tags origin "refs/tags/v${NEXT_VERSION}" | grep -q .; do
+            NEXT_VERSION=$(npx semver "$NEXT_VERSION" -i prerelease --preid beta)
+          done
+
+          echo "Current version: $CURRENT_VERSION"
+          echo "Forced beta version: $NEXT_VERSION"
+
+          npm version "$NEXT_VERSION" --no-git-tag-version
+          npm config set //registry.npmjs.org/:_authToken "$NPM_TOKEN"
+          npm publish --access public --tag beta --dry-run
+          npm publish --access public --tag beta
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git"
+          git add package.json package-lock.json dist-action/index.mjs
+          git commit -m "chore(beta): publish v${NEXT_VERSION} to npm [skip ci]" || true
+          git tag -a "v${NEXT_VERSION}" -m "v${NEXT_VERSION}" || true
+          git notes --ref="semantic-release-v${NEXT_VERSION}" add -f -m "{\"channels\":[\"${TARGET_BRANCH}\"]}" "v${NEXT_VERSION}" || true
+          git push origin HEAD:"${{ github.event.workflow_run.head_branch || github.ref_name }}" --follow-tags || true
+          git push origin "refs/notes/semantic-release-v${NEXT_VERSION}" || true
+          exit 0
+
       - name: Release
+        if: github.event_name != 'workflow_dispatch' || !inputs.force_beta_prerelease
         id: release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npx semantic-release
 
-      # After a successful release, update the floating major-version tag
-      # (e.g. v2) so that GitHub Action users referencing @v2 always get
-      # the latest 2.x.x release.
-      - name: Update floating major-version tag
-        if: steps.release.outcome == 'success'
+      # If stable release on main, update floating major tag (e.g. v3)
+      - name: Update floating major tag on main
+        if: steps.release.outcome == 'success' && (github.event.workflow_run.head_branch == 'main' || github.ref_name == 'main')
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Read the just-released version from package.json
+          git fetch --tags --force
+          TAG=$(git tag --sort=-version:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+          echo "Most recent stable release tag: $TAG"
+
+          if [ -n "$TAG" ]; then
+            VERSION="${TAG#v}"
+            MAJOR=$(echo "$VERSION" | cut -d. -f1)
+            echo "Updating floating tag: v${MAJOR} -> $TAG"
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git"
+            git tag -fa "v${MAJOR}" "$TAG" -m "Update v${MAJOR} tag to $TAG" || true
+            git push origin "v${MAJOR}" --force || echo "Warning: could not force-push v${MAJOR}"
+          fi
+
+      # When a stable release is created on main, merge the release commit
+      # (package.json + CHANGELOG.md) back into develop so develop and main
+      # never diverge and stay 100% conflict-free.
+      - name: Sync main release commit back to develop
+        if: steps.release.outcome == 'success' && (github.event.workflow_run.head_branch == 'main' || github.ref_name == 'main')
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
           VERSION=$(node -p "require('./package.json').version")
-          MAJOR=$(echo "$VERSION" | cut -d. -f1)
-
-          echo "Released version: v${VERSION}"
-          echo "Updating floating tag: v${MAJOR}"
-
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          # Configure remote with token (persist-credentials: false above)
           git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git"
 
-          # Force-create the major-version tag and push it
-          git tag -fa "v${MAJOR}" -m "Update v${MAJOR} tag to v${VERSION}"
-          git push origin "v${MAJOR}" --force
+          git fetch origin develop
+          git checkout develop
+          git merge main -m "chore(sync): back-merge release v${VERSION} into develop [skip ci]" || {
+            echo "Merge conflict detected during back-merge. Preserving develop dependencies and syncing changelog..."
+            git checkout --ours package.json package-lock.json 2>/dev/null || true
+            git checkout --theirs CHANGELOG.md 2>/dev/null || true
+            git add CHANGELOG.md package.json package-lock.json 2>/dev/null || true
+            git commit -m "chore(sync): back-merge release v${VERSION} into develop (resolved) [skip ci]" || true
+          }
+          git push origin develop || echo "Skipping push if develop is already up to date"

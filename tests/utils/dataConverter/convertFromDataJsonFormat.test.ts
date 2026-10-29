@@ -11,121 +11,167 @@ describe('convertFromDataJsonFormat', () => {
   test('should handle a single sheet with a single locale', () => {
     const dataJson = [
       {
-        'home': {
-          'en': {
-            'welcome': 'Welcome',
-            'hello': 'Hello'
-          }
-        }
-      }
+        home: {
+          en: {
+            welcome: 'Welcome',
+            hello: 'Hello',
+          },
+        },
+      },
     ];
-    
+
     const result = convertFromDataJsonFormat(dataJson);
-    
+
     expect(result).toHaveProperty('en');
     expect(result.en).toHaveProperty('home');
     expect(result.en.home).toEqual({
-      'welcome': 'Welcome',
-      'hello': 'Hello'
+      welcome: 'Welcome',
+      hello: 'Hello',
     });
   });
 
   test('should handle multiple sheets with multiple locales', () => {
     const dataJson = [
       {
-        'home': {
-          'en': {
-            'welcome': 'Welcome',
-            'hello': 'Hello'
+        home: {
+          en: {
+            welcome: 'Welcome',
+            hello: 'Hello',
           },
-          'de': {
-            'welcome': 'Willkommen',
-            'hello': 'Hallo'
-          }
-        }
+          de: {
+            welcome: 'Willkommen',
+            hello: 'Hallo',
+          },
+        },
       },
       {
-        'about': {
-          'en': {
-            'title': 'About us'
+        about: {
+          en: {
+            title: 'About us',
           },
-          'de': {
-            'title': 'Über uns'
-          }
-        }
-      }
+          de: {
+            title: 'Über uns',
+          },
+        },
+      },
     ];
-    
+
     const result = convertFromDataJsonFormat(dataJson);
-    
+
     // Check English translations
     expect(result).toHaveProperty('en');
     expect(result.en).toHaveProperty('home');
     expect(result.en).toHaveProperty('about');
     expect(result.en.home).toEqual({
-      'welcome': 'Welcome',
-      'hello': 'Hello'
+      welcome: 'Welcome',
+      hello: 'Hello',
     });
     expect(result.en.about).toEqual({
-      'title': 'About us'
+      title: 'About us',
     });
-    
+
     // Check German translations
     expect(result).toHaveProperty('de');
     expect(result.de).toHaveProperty('home');
     expect(result.de).toHaveProperty('about');
     expect(result.de.home).toEqual({
-      'welcome': 'Willkommen',
-      'hello': 'Hallo'
+      welcome: 'Willkommen',
+      hello: 'Hallo',
     });
     expect(result.de.about).toEqual({
-      'title': 'Über uns'
+      title: 'Über uns',
     });
   });
 
   test('should handle complex translation values', () => {
     const dataJson = [
       {
-        'home': {
-          'en': {
-            'welcome': 'Welcome',
-            'count': 5,
-            'enabled': true,
-            'config': { 'showHeader': true }
-          }
-        }
-      }
+        home: {
+          en: {
+            welcome: 'Welcome',
+            count: 5,
+            enabled: true,
+            config: { showHeader: true },
+          },
+        },
+      },
     ];
-    
+
     const result = convertFromDataJsonFormat(dataJson);
-    
+
     expect(result.en.home).toEqual({
-      'welcome': 'Welcome',
-      'count': 5,
-      'enabled': true,
-      'config': { 'showHeader': true }
+      welcome: 'Welcome',
+      count: 5,
+      enabled: true,
+      config: { showHeader: true },
     });
   });
 
   test('should handle empty sheets', () => {
     const dataJson = [
       {
-        'home': {}
-      }
+        home: {},
+      },
     ];
-    
+
     const result = convertFromDataJsonFormat(dataJson);
     expect(result).toEqual({});
   });
 
   test('should skip entry and warn when sheet value is not an object', () => {
-    const consoleSpy = jest.spyOn(console, 'warn').mockImplementation();
+    const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
-    const dataJson = [{ 'mySheet': 'invalid-string-instead-of-object' }] as unknown as Record<string, unknown>[];
+    const dataJson = [{ mySheet: 'invalid-string-instead-of-object' }] as unknown as Record<
+      string,
+      unknown
+    >[];
     const result = convertFromDataJsonFormat(dataJson);
 
     expect(result).toEqual({});
     expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('mySheet'));
     consoleSpy.mockRestore();
+  });
+
+  test('should skip locale entries when localeData is null', () => {
+    const dataJson = [
+      {
+        home: {
+          en: null,
+          fr: {
+            welcome: 'Bienvenue',
+          },
+        },
+      },
+    ] as unknown as Record<string, unknown>[];
+
+    const result = convertFromDataJsonFormat(dataJson);
+
+    expect(result.en).toEqual({ home: {} });
+    expect(result.fr?.home?.welcome).toBe('Bienvenue');
+  });
+
+  test('should merge keys when multiple entries define the same sheet and locale', () => {
+    const dataJson = [
+      {
+        home: {
+          en: {
+            title: 'Welcome',
+          },
+        },
+      },
+      {
+        home: {
+          en: {
+            subtitle: 'Enjoy your stay',
+          },
+        },
+      },
+    ] as unknown as Record<string, unknown>[];
+
+    const result = convertFromDataJsonFormat(dataJson);
+    expect(result.en?.home).toEqual({
+      title: 'Welcome',
+      subtitle: 'Enjoy your stay',
+    });
   });
 });
