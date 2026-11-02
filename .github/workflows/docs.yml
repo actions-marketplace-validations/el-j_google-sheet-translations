@@ -51,7 +51,7 @@ jobs:
       github.event.workflow_run.conclusion == 'success'
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@v7.0.1
         with:
           # When triggered by workflow_run, check out head branch so we get the
           # version-bumped package.json committed by semantic-release.
@@ -106,7 +106,7 @@ jobs:
         run: node scripts/verify-demo-translations.mjs
 
       - name: Download existing gh-pages artifact for version archival
-        uses: actions/checkout@v7
+        uses: actions/checkout@v7.0.1
         with:
           ref: gh-pages
           path: _previous_pages
